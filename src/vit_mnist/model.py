@@ -260,6 +260,155 @@ class MultiHeadSelfAttention(nn.Module):
         return output
 
 
+class FeedForwardMLP(nn.Module):
+    """Transform each token's features independently with a small MLP.
+
+    Expected input shape: ``[B, T, D]``.
+    Output shape: ``[B, T, D]``.
+
+    The same learned ``D -> M -> D`` transformation is applied to every token;
+    unlike self-attention, this component does not mix information between
+    token positions.
+    """
+
+    def __init__(
+        self,
+        embedding_dim: int = 64,
+        hidden_dim: int = 128,
+        dropout: float = 0.0,
+    ) -> None:
+        super().__init__()
+
+        if embedding_dim <= 0:
+            raise ValueError("embedding_dim must be positive")
+        if hidden_dim <= 0:
+            raise ValueError("hidden_dim must be positive")
+        if not 0.0 <= dropout < 1.0:
+            raise ValueError("dropout must be in the range [0.0, 1.0)")
+
+        self.embedding_dim = embedding_dim
+        self.hidden_dim = hidden_dim
+
+        self.input_projection = nn.Linear(embedding_dim, hidden_dim)
+        self.activation = nn.GELU()
+        self.dropout_after_activation = nn.Dropout(dropout)
+        self.output_projection = nn.Linear(hidden_dim, embedding_dim)
+        self.dropout_after_output = nn.Dropout(dropout)
+
+    def forward(self, tokens: Tensor) -> Tensor:
+        """Apply the same feature transformation to each token separately."""
+
+        assert tokens.ndim == 3, (
+            "tokens must have shape [B, T, D], "
+            f"but received {tuple(tokens.shape)}"
+        )
+
+        batch_size, num_tokens, embedding_dim = tokens.shape
+        assert embedding_dim == self.embedding_dim, (
+            f"expected embedding dimension {self.embedding_dim}, "
+            f"but received {embedding_dim}"
+        )
+
+        hidden_features = self.input_projection(tokens)
+        # [B, T, D] -> [B, T, M] = [B, 17, 64] -> [B, 17, 128]
+        assert hidden_features.shape == (
+            batch_size,
+            num_tokens,
+            self.hidden_dim,
+        )
+
+        activated_features = self.activation(hidden_features)
+        # GELU preserves [B, T, M] = [B, 17, 128]
+
+        activated_features = self.dropout_after_activation(activated_features)
+        # Dropout preserves [B, T, M]; it is inactive when dropout=0.0.
+
+        projected_features = self.output_projection(activated_features)
+        # [B, T, M] -> [B, T, D] = [B, 17, 128] -> [B, 17, 64]
+
+        output = self.dropout_after_output(projected_features)
+        # Dropout preserves [B, T, D]; it is inactive when dropout=0.0.
+        assert output.shape == (
+            batch_size,
+            num_tokens,
+            self.embedding_dim,
+        )
+
+        return output
+
+
+class TransformerBlock(nn.Module):
+    """Apply one pre-normalized transformer encoder block.
+
+    Expected input shape: ``[B, T, D]``.
+    Output shape: ``[B, T, D]``.
+    """
+
+    def __init__(
+        self,
+        embedding_dim: int = 64,
+        num_heads: int = 4,
+        hidden_dim: int = 128,
+        dropout: float = 0.0,
+    ) -> None:
+        super().__init__()
+
+        if embedding_dim <= 0:
+            raise ValueError("embedding_dim must be positive")
+
+        self.embedding_dim = embedding_dim
+
+        self.norm1 = nn.LayerNorm(embedding_dim)
+        self.attention = MultiHeadSelfAttention(
+            embedding_dim=embedding_dim,
+            num_heads=num_heads,
+        )
+        self.norm2 = nn.LayerNorm(embedding_dim)
+        self.mlp = FeedForwardMLP(
+            embedding_dim=embedding_dim,
+            hidden_dim=hidden_dim,
+            dropout=dropout,
+        )
+
+    def forward(self, tokens: Tensor) -> Tensor:
+        """Run pre-norm attention and MLP sublayers with residual additions."""
+
+        assert tokens.ndim == 3, (
+            "tokens must have shape [B, T, D], "
+            f"but received {tuple(tokens.shape)}"
+        )
+
+        batch_size, num_tokens, embedding_dim = tokens.shape
+        assert embedding_dim == self.embedding_dim, (
+            f"expected embedding dimension {self.embedding_dim}, "
+            f"but received {embedding_dim}"
+        )
+        expected_shape = (batch_size, num_tokens, self.embedding_dim)
+
+        normalized_for_attention = self.norm1(tokens)
+        # [B, T, D] = [B, 17, 64]
+        attention_output = self.attention(normalized_for_attention)
+        # [B, T, D] = [B, 17, 64]
+        assert tokens.shape == attention_output.shape == expected_shape
+
+        # Both operands are [B, T, D], so their residual addition is valid.
+        tokens_after_attention = tokens + attention_output
+        # [B, T, D] = [B, 17, 64]
+
+        normalized_for_mlp = self.norm2(tokens_after_attention)
+        # [B, T, D] = [B, 17, 64]
+        mlp_output = self.mlp(normalized_for_mlp)
+        # [B, T, D] = [B, 17, 64]
+        assert tokens_after_attention.shape == mlp_output.shape == expected_shape
+
+        # Both operands are [B, T, D], so their residual addition is valid.
+        output = tokens_after_attention + mlp_output
+        # [B, T, D] = [B, 17, 64]
+        assert output.shape == expected_shape
+
+        return output
+
+
 def _run_smoke_test() -> None:
     """Run direct component checks without requiring MNIST data."""
 
@@ -303,6 +452,40 @@ def _run_smoke_test() -> None:
         "MultiHeadSelfAttention smoke test passed: "
         f"{tuple(tokens.shape)} -> {tuple(attention_output.shape)}, "
         f"attention matrix {expected_attention_shape}"
+    )
+
+    mlp = FeedForwardMLP()
+    mlp_output = mlp(tokens)
+
+    assert mlp_output.shape == expected_output_shape, (
+        f"expected output shape {expected_output_shape}, "
+        f"but received {tuple(mlp_output.shape)}"
+    )
+    assert torch.isfinite(mlp_output).all()
+
+    print(
+        "FeedForwardMLP smoke test passed: "
+        f"{tuple(tokens.shape)} -> {tuple(mlp_output.shape)}"
+    )
+
+    transformer_block = TransformerBlock()
+    transformer_output = transformer_block(tokens)
+
+    assert transformer_output.shape == expected_output_shape, (
+        f"expected output shape {expected_output_shape}, "
+        f"but received {tuple(transformer_output.shape)}"
+    )
+    assert torch.isfinite(transformer_output).all()
+
+    tokens.grad = None
+    transformer_output.square().mean().backward()
+    assert tokens.grad is not None
+    assert torch.isfinite(tokens.grad).all()
+
+    print(
+        "TransformerBlock smoke test passed: "
+        f"{tuple(tokens.shape)} -> {tuple(transformer_output.shape)}, "
+        "finite input gradients"
     )
 
 
