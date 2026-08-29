@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import math
+
 import torch
 from torch import Tensor, nn
 
@@ -110,8 +112,156 @@ class PatchEmbedding(nn.Module):
         return patch_embeddings
 
 
+class MultiHeadSelfAttention(nn.Module):
+    """Apply explicit multi-head scaled dot-product self-attention.
+
+    Expected input shape: ``[B, T, D]``.
+    Output shape: ``[B, T, D]``.
+
+    The implemented operation is:
+    ``softmax(Q @ K^T / sqrt(Dh)) @ V``.
+    """
+
+    def __init__(
+        self,
+        embedding_dim: int = 64,
+        num_heads: int = 4,
+    ) -> None:
+        super().__init__()
+
+        if embedding_dim <= 0:
+            raise ValueError("embedding_dim must be positive")
+        if num_heads <= 0:
+            raise ValueError("num_heads must be positive")
+        if embedding_dim % num_heads != 0:
+            raise ValueError("embedding_dim must be divisible by num_heads")
+
+        self.embedding_dim = embedding_dim
+        self.num_heads = num_heads
+        self.head_dim = embedding_dim // num_heads
+
+        self.q_projection = nn.Linear(embedding_dim, embedding_dim)
+        self.k_projection = nn.Linear(embedding_dim, embedding_dim)
+        self.v_projection = nn.Linear(embedding_dim, embedding_dim)
+        self.output_projection = nn.Linear(embedding_dim, embedding_dim)
+
+    def forward(self, tokens: Tensor) -> Tensor:
+        """Mix information among all tokens through explicit self-attention."""
+
+        assert tokens.ndim == 3, (
+            "tokens must have shape [B, T, D], "
+            f"but received {tuple(tokens.shape)}"
+        )
+
+        batch_size, num_tokens, embedding_dim = tokens.shape
+        assert embedding_dim == self.embedding_dim, (
+            f"expected embedding dimension {self.embedding_dim}, "
+            f"but received {embedding_dim}"
+        )
+
+        queries = self.q_projection(tokens)
+        # [B, T, D] = [B, 17, 64]
+        keys = self.k_projection(tokens)
+        # [B, T, D] = [B, 17, 64]
+        values = self.v_projection(tokens)
+        # [B, T, D] = [B, 17, 64]
+
+        queries = queries.reshape(
+            batch_size,
+            num_tokens,
+            self.num_heads,
+            self.head_dim,
+        )
+        # [B, T, A, Dh] = [B, 17, 4, 16]
+        keys = keys.reshape(
+            batch_size,
+            num_tokens,
+            self.num_heads,
+            self.head_dim,
+        )
+        # [B, T, A, Dh] = [B, 17, 4, 16]
+        values = values.reshape(
+            batch_size,
+            num_tokens,
+            self.num_heads,
+            self.head_dim,
+        )
+        # [B, T, A, Dh] = [B, 17, 4, 16]
+
+        queries = queries.transpose(1, 2)
+        # [B, A, T, Dh] = [B, 4, 17, 16]
+        keys = keys.transpose(1, 2)
+        # [B, A, T, Dh] = [B, 4, 17, 16]
+        values = values.transpose(1, 2)
+        # [B, A, T, Dh] = [B, 4, 17, 16]
+        expected_head_shape = (
+            batch_size,
+            self.num_heads,
+            num_tokens,
+            self.head_dim,
+        )
+        assert queries.shape == expected_head_shape
+        assert keys.shape == expected_head_shape
+        assert values.shape == expected_head_shape
+
+        transposed_keys = keys.transpose(-2, -1)
+        # [B, A, Dh, T] = [B, 4, 16, 17]
+
+        attention_scores = torch.matmul(queries, transposed_keys)
+        # [B, A, T, T] = [B, 4, 17, 17]
+        expected_attention_shape = (
+            batch_size,
+            self.num_heads,
+            num_tokens,
+            num_tokens,
+        )
+        assert attention_scores.shape == expected_attention_shape
+
+        scale = math.sqrt(self.head_dim)
+        scaled_attention_scores = attention_scores / scale
+        # [B, A, T, T] = [B, 4, 17, 17]
+
+        attention_probabilities = torch.softmax(
+            scaled_attention_scores,
+            dim=-1,
+        )
+        # [B, A, T, T] = [B, 4, 17, 17]
+        assert attention_probabilities.shape == expected_attention_shape
+        probability_sums = attention_probabilities.sum(dim=-1)
+        # [B, A, T] = [B, 4, 17]
+        assert torch.allclose(
+            probability_sums,
+            torch.ones_like(probability_sums),
+            atol=1e-6,
+        )
+
+        context = torch.matmul(attention_probabilities, values)
+        # [B, A, T, Dh] = [B, 4, 17, 16]
+        assert context.shape == expected_head_shape
+
+        context_with_tokens_first = context.transpose(1, 2)
+        # [B, T, A, Dh] = [B, 17, 4, 16]
+
+        merged_heads = context_with_tokens_first.reshape(
+            batch_size,
+            num_tokens,
+            self.embedding_dim,
+        )
+        # [B, T, D] = [B, 17, 64]
+
+        output = self.output_projection(merged_heads)
+        # [B, T, D] = [B, 17, 64]
+        assert output.shape == (
+            batch_size,
+            num_tokens,
+            self.embedding_dim,
+        )
+
+        return output
+
+
 def _run_smoke_test() -> None:
-    """Run a direct shape check without requiring MNIST data."""
+    """Run direct component checks without requiring MNIST data."""
 
     torch.manual_seed(0)
 
@@ -125,6 +275,35 @@ def _run_smoke_test() -> None:
     )
 
     print(f"PatchEmbedding smoke test passed: {tuple(images.shape)} -> {tuple(output.shape)}")
+
+    attention = MultiHeadSelfAttention()
+    tokens = torch.randn(2, 17, 64, requires_grad=True)
+    attention_output = attention(tokens)
+
+    expected_output_shape = (2, 17, 64)
+    assert attention_output.shape == expected_output_shape, (
+        f"expected output shape {expected_output_shape}, "
+        f"but received {tuple(attention_output.shape)}"
+    )
+
+    expected_attention_shape = (2, 4, 17, 17)
+    conceptual_attention_shape = (
+        tokens.shape[0],
+        attention.num_heads,
+        tokens.shape[1],
+        tokens.shape[1],
+    )
+    assert conceptual_attention_shape == expected_attention_shape
+
+    attention_output.square().mean().backward()
+    assert tokens.grad is not None
+    assert torch.isfinite(tokens.grad).all()
+
+    print(
+        "MultiHeadSelfAttention smoke test passed: "
+        f"{tuple(tokens.shape)} -> {tuple(attention_output.shape)}, "
+        f"attention matrix {expected_attention_shape}"
+    )
 
 
 if __name__ == "__main__":
