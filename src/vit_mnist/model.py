@@ -409,6 +409,121 @@ class TransformerBlock(nn.Module):
         return output
 
 
+class VisionTransformer(nn.Module):
+    """Assemble the complete Vision Transformer for image classification.
+
+    Expected input shape: ``[B, C, H, W]``.
+    Output shape: ``[B, K]``, where ``K`` is the number of classes.
+    """
+
+    def __init__(
+        self,
+        image_size: int = 28,
+        patch_size: int = 7,
+        in_channels: int = 1,
+        num_classes: int = 10,
+        embedding_dim: int = 64,
+        depth: int = 2,
+        num_heads: int = 4,
+        hidden_dim: int = 128,
+        dropout: float = 0.0,
+    ) -> None:
+        super().__init__()
+
+        if num_classes <= 0:
+            raise ValueError("num_classes must be positive")
+        if depth <= 0:
+            raise ValueError("depth must be positive")
+
+        self.embedding_dim = embedding_dim
+        self.depth = depth
+        self.num_classes = num_classes
+
+        self.patch_embedding = PatchEmbedding(
+            image_size=image_size,
+            patch_size=patch_size,
+            in_channels=in_channels,
+            embedding_dim=embedding_dim,
+        )
+        self.num_tokens = self.patch_embedding.num_patches + 1
+
+        # A single learned class-token parameter is shared by every image.
+        self.class_token = nn.Parameter(
+            torch.randn(1, 1, embedding_dim) * 0.02
+        )
+
+        # Self-attention alone does not know where image patches came from, so
+        # each token position receives its own learned positional information.
+        self.positional_embedding = nn.Parameter(
+            torch.randn(1, self.num_tokens, embedding_dim) * 0.02
+        )
+
+        self.blocks = nn.ModuleList(
+            [
+                TransformerBlock(
+                    embedding_dim=embedding_dim,
+                    num_heads=num_heads,
+                    hidden_dim=hidden_dim,
+                    dropout=dropout,
+                )
+                for _ in range(depth)
+            ]
+        )
+        self.final_norm = nn.LayerNorm(embedding_dim)
+        self.classifier = nn.Linear(embedding_dim, num_classes)
+
+    def forward(self, images: Tensor) -> Tensor:
+        """Convert a batch of images into raw class logits."""
+
+        patch_tokens = self.patch_embedding(images)
+        # [B, C, H, W] -> [B, N, D] = [B, 1, 28, 28] -> [B, 16, 64]
+        batch_size = patch_tokens.shape[0]
+
+        class_tokens = self.class_token.expand(
+            batch_size,
+            1,
+            self.embedding_dim,
+        )
+        # [1, 1, D] -> [B, 1, D] = [1, 1, 64] -> [B, 1, 64]
+        # expand creates one batch view of the same learned parameter per image.
+
+        tokens = torch.cat((class_tokens, patch_tokens), dim=1)
+        # [B, 1, D] + [B, N, D] -> [B, T, D] = [B, 17, 64]
+        expected_token_shape = (
+            batch_size,
+            self.num_tokens,
+            self.embedding_dim,
+        )
+        assert tokens.shape == expected_token_shape
+
+        tokens = tokens + self.positional_embedding
+        # [B, T, D] + [1, T, D] -> [B, T, D] = [B, 17, 64].
+        # Broadcasting shares the positional table across the batch dimension.
+        assert tokens.shape == expected_token_shape
+
+        for block in self.blocks:
+            tokens = block(tokens)
+            # Each block preserves [B, T, D] = [B, 17, 64].
+            assert tokens.shape == expected_token_shape
+
+        normalized_tokens = self.final_norm(tokens)
+        # LayerNorm preserves [B, T, D] = [B, 17, 64].
+
+        class_representation = normalized_tokens[:, 0]
+        # Select token position zero: [B, T, D] -> [B, D] = [B, 64].
+        assert class_representation.shape == (
+            batch_size,
+            self.embedding_dim,
+        )
+
+        logits = self.classifier(class_representation)
+        # [B, D] -> [B, K] = [B, 64] -> [B, 10].
+        # No softmax: CrossEntropyLoss later expects these raw logits.
+        assert logits.shape == (batch_size, self.num_classes)
+
+        return logits
+
+
 def _run_smoke_test() -> None:
     """Run direct component checks without requiring MNIST data."""
 
@@ -486,6 +601,37 @@ def _run_smoke_test() -> None:
         "TransformerBlock smoke test passed: "
         f"{tuple(tokens.shape)} -> {tuple(transformer_output.shape)}, "
         "finite input gradients"
+    )
+
+    vision_transformer = VisionTransformer()
+    model_images = torch.randn(2, 1, 28, 28, requires_grad=True)
+    logits = vision_transformer(model_images)
+
+    expected_logits_shape = (2, 10)
+    assert logits.shape == expected_logits_shape, (
+        f"expected output shape {expected_logits_shape}, "
+        f"but received {tuple(logits.shape)}"
+    )
+    assert torch.isfinite(logits).all()
+    assert vision_transformer.class_token.shape == (1, 1, 64)
+    assert vision_transformer.positional_embedding.shape == (1, 17, 64)
+    assert len(vision_transformer.blocks) == 2
+    assert all(
+        isinstance(block, TransformerBlock)
+        for block in vision_transformer.blocks
+    )
+
+    logits.sum().backward()
+    assert model_images.grad is not None
+    assert torch.isfinite(model_images.grad).all()
+    for parameter in vision_transformer.parameters():
+        assert parameter.grad is not None
+        assert torch.isfinite(parameter.grad).all()
+
+    print(
+        "VisionTransformer smoke test passed: "
+        f"{tuple(model_images.shape)} -> {tuple(logits.shape)}, "
+        "two blocks and finite end-to-end gradients"
     )
 
 
