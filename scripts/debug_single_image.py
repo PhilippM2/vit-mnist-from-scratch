@@ -1,4 +1,4 @@
-"""Step one real MNIST test image through the untrained ViT on CPU."""
+"""Step one real MNIST test image through the trained ViT on CPU."""
 
 from __future__ import annotations
 
@@ -27,8 +27,26 @@ def main() -> None:
     torch.manual_seed(seed)
 
     device = torch.device("cpu")
+    checkpoint_path = PROJECT_ROOT / "checkpoints" / "vit_mnist.pt"
+    if not checkpoint_path.is_file():
+        raise FileNotFoundError(
+            "Trained model checkpoint not found at "
+            f"{checkpoint_path}. Run `python .\\train.py` first or place the "
+            "trained state_dict at that path."
+        )
+
     model = VisionTransformer().to(device)
+
+    state_dict = torch.load(
+        checkpoint_path,
+        map_location=device,
+        weights_only=True,
+    )
+
+    model.load_state_dict(state_dict)
     model.eval()
+
+    print(f"Checkpoint path: {checkpoint_path}")
 
     _, test_loader = create_mnist_loaders(
         batch_size=1,
@@ -49,11 +67,14 @@ def main() -> None:
     batched_image = batched_image.to(device)
     with torch.no_grad():
         logits = model(batched_image)
+    assert logits.shape == (1, 10)
+    assert not logits.requires_grad
 
     predicted_label = logits.argmax(dim=1).item()
     print(f"Logits: {logits}")
+    print(f"Logits shape: {list(logits.shape)}")
     print(f"Predicted label: {predicted_label}")
-    print("The prediction is not meaningful yet because the model has random weights.")
+    print(f"Prediction correct: {predicted_label == true_label}")
 
 
 if __name__ == "__main__":

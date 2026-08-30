@@ -6,8 +6,7 @@ from basic PyTorch tensor operations so that the complete forward pass can be
 understood and inspected one step at a time.
 
 The repository now contains the explicit ViT, MNIST data loaders, a
-single-image debugger, and a straightforward CPU training pipeline. The next
-normal training experiment remains intentionally gated on review.
+trained single-image debugger, and a straightforward CPU training pipeline.
 
 ## Goals
 
@@ -34,7 +33,7 @@ The implementation will not use:
 Torchvision may be used later for loading MNIST and applying basic image
 transforms. The model itself will be written locally.
 
-## Proposed baseline
+## Baseline architecture
 
 | Setting | Value |
 | --- | ---: |
@@ -82,7 +81,7 @@ from patch extraction through attention and classification without jumping
 between many files. Data loading and training remain separate so the model has
 no import-time side effects.
 
-## Planned forward pass
+## Forward pass
 
 ```text
 [B, 1, 28, 28] image batch
@@ -112,7 +111,6 @@ phases are in [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md).
 ## Environment
 
 The repository currently uses a Python 3.12 virtual environment at `.venv`.
-No packages are installed as part of the planning phase.
 
 PowerShell activation command:
 
@@ -123,27 +121,46 @@ PowerShell activation command:
 The pinned CPU environment provides PyTorch and torchvision; torchvision is
 used only for MNIST loading and basic tensor normalization.
 
-## Running the current phase
+## Results
 
-Activate the virtual environment, then run the fixed 128-example overfit check:
+The normal five-epoch MNIST experiment produced:
+
+| Epoch | Train loss | Train accuracy | Test accuracy |
+| ---: | ---: | ---: | ---: |
+| 1 | 0.8896 | 71.64% | 85.17% |
+| 2 | 0.3598 | 88.92% | 91.83% |
+| 3 | 0.2358 | 92.76% | 93.83% |
+| 4 | 0.1839 | 94.36% | 94.52% |
+| 5 | 0.1501 | 95.41% | 95.23% |
+
+The tiny-subset validation used 128 fixed training examples and reached 100%
+training accuracy, with a final loss of 0.0632 after 100 epochs. Deliberately
+overfitting this small subset verifies that the model, loss, optimizer, and
+gradient-update pipeline can learn. The final 95.23% test accuracy from normal
+training demonstrates generalization to unseen MNIST test images.
+
+## Running the project
+
+Activate the virtual environment:
 
 ```powershell
 .\.venv\Scripts\Activate.ps1
-python .\train.py --tiny-subset
 ```
 
-This uses CPU, seed `0`, batch size `128`, AdamW, learning rate `3e-4`, weight
-decay `1e-2`, and `num_workers=0`. It saves the final `state_dict` to
-`checkpoints/vit_mnist.pt`, which is ignored through the `*.pt` rule.
-
-After review, the normal five-epoch run will be:
+Run the normal five-epoch MNIST training experiment with:
 
 ```powershell
 python .\train.py
 ```
 
-The single-image debugger remains available with:
+Step the fixed MNIST test image at dataset index 0 through the trained model on
+CPU with:
 
 ```powershell
 python .\scripts\debug_single_image.py
 ```
+
+The debugger loads `checkpoints/vit_mnist.pt`, keeps the model output as raw
+logits, and uses batch size one with gradient recording disabled. Checkpoint
+files ending in `.pt` are intentionally ignored by Git and must not be
+committed.
