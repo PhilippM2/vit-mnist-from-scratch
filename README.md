@@ -5,8 +5,9 @@ Transformer (ViT) that classifies MNIST digits. The model will be implemented
 from basic PyTorch tensor operations so that the complete forward pass can be
 understood and inspected one step at a time.
 
-The project currently contains planning documentation only. No model code or
-third-party dependencies have been added yet.
+The repository now contains the explicit ViT, MNIST data loaders, a
+single-image debugger, and a straightforward CPU training pipeline. The next
+normal training experiment remains intentionally gated on review.
 
 ## Goals
 
@@ -57,28 +58,22 @@ to `49` values, and apply `nn.Linear(49, 64)` to each patch. A `Conv2d` patch
 projection is intentionally excluded from the baseline so every rearrangement
 remains visible in the debugger.
 
-## Proposed minimal structure
-
-Only the three documentation files at the top are created during the planning
-phase. The remaining files are planned and will be added incrementally after
-the plan is approved.
+## Project structure
 
 ```text
 vit-mnist-from-scratch/
 |-- AGENTS.md
 |-- README.md
 |-- IMPLEMENTATION_PLAN.md
+|-- train.py
 |-- src/
 |   `-- vit_mnist/
-|       |-- __init__.py
 |       |-- model.py
-|       |-- data.py
-|       `-- train.py
+|       `-- data.py
 |-- scripts/
 |   `-- debug_single_image.py
 |-- tests/
-|   |-- test_attention.py
-|   `-- test_model.py
+|   `-- test_training.py
 `-- data/                       # downloaded data; ignored by Git
 ```
 
@@ -125,5 +120,30 @@ PowerShell activation command:
 .\.venv\Scripts\Activate.ps1
 ```
 
-Dependency selection and installation will happen only after the architecture
-plan is reviewed.
+The pinned CPU environment provides PyTorch and torchvision; torchvision is
+used only for MNIST loading and basic tensor normalization.
+
+## Running the current phase
+
+Activate the virtual environment, then run the fixed 128-example overfit check:
+
+```powershell
+.\.venv\Scripts\Activate.ps1
+python .\train.py --tiny-subset
+```
+
+This uses CPU, seed `0`, batch size `128`, AdamW, learning rate `3e-4`, weight
+decay `1e-2`, and `num_workers=0`. It saves the final `state_dict` to
+`checkpoints/vit_mnist.pt`, which is ignored through the `*.pt` rule.
+
+After review, the normal five-epoch run will be:
+
+```powershell
+python .\train.py
+```
+
+The single-image debugger remains available with:
+
+```powershell
+python .\scripts\debug_single_image.py
+```
