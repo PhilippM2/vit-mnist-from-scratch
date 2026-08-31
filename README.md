@@ -1,37 +1,32 @@
 # Vision Transformer on MNIST, from Scratch
 
-This repository is an educational project for building a small Vision
-Transformer (ViT) that classifies MNIST digits. The model will be implemented
-from basic PyTorch tensor operations so that the complete forward pass can be
-understood and inspected one step at a time.
+This repository contains an educational Vision Transformer (ViT) that
+classifies MNIST digits. The model is written from basic PyTorch tensor
+operations so the complete forward pass can be understood and inspected one
+step at a time.
 
-The repository now contains the explicit ViT, MNIST data loaders, a
-trained single-image debugger, and a straightforward CPU training pipeline.
+Readability and debuggability take priority over training speed and benchmark
+performance. In particular, the implementation keeps patch extraction and the
+query, key, value, attention-score, softmax, and context calculations explicit.
 
-## Goals
+## Learning goals and constraints
 
-- Understand how an image becomes a sequence of patch tokens.
-- Implement query, key, and value projections explicitly.
-- Implement multi-head scaled dot-product self-attention explicitly.
+- Follow how an image becomes a sequence of patch tokens.
+- Inspect separate query, key, and value projections.
+- Inspect multi-head scaled dot-product self-attention.
 - Understand residual connections, layer normalization, and the transformer
   MLP.
 - Train a deliberately small ViT on MNIST.
-- Make a single-image forward pass easy to follow in the VS Code debugger.
+- Step through one image in the VS Code debugger.
 
-Readability and debuggability take priority over training speed and benchmark
-performance.
-
-## Constraints
-
-The implementation will not use:
+The implementation does not use:
 
 - `timm`
 - torchvision's `VisionTransformer`
 - `torch.nn.MultiheadAttention`
-- external ViT implementations
+- fused or external ViT implementations
 
-Torchvision may be used later for loading MNIST and applying basic image
-transforms. The model itself will be written locally.
+Torchvision is used only for MNIST loading and basic image transforms.
 
 ## Baseline architecture
 
@@ -48,40 +43,13 @@ transforms. The model itself will be written locally.
 | MLP hidden dimension | `128` |
 | Output classes | `10` |
 
-This baseline is small enough for shape inspection and CPU experiments while
-still containing the important ViT mechanisms.
+Patch embedding is deliberately explicit: the code splits each image into
+non-overlapping `7 x 7` patches, flattens every grayscale patch from
+`1 x 7 x 7` to 49 values, and applies `nn.Linear(49, 64)`. A `Conv2d` patch
+projection is intentionally excluded so every rearrangement remains visible in
+the debugger.
 
-Patch embedding will be deliberately explicit: split the image into
-non-overlapping `7 x 7` patches, flatten each grayscale patch from `1 x 7 x 7`
-to `49` values, and apply `nn.Linear(49, 64)` to each patch. A `Conv2d` patch
-projection is intentionally excluded from the baseline so every rearrangement
-remains visible in the debugger.
-
-## Project structure
-
-```text
-vit-mnist-from-scratch/
-|-- AGENTS.md
-|-- README.md
-|-- IMPLEMENTATION_PLAN.md
-|-- train.py
-|-- src/
-|   `-- vit_mnist/
-|       |-- model.py
-|       `-- data.py
-|-- scripts/
-|   `-- debug_single_image.py
-|-- tests/
-|   `-- test_training.py
-`-- data/                       # downloaded data; ignored by Git
-```
-
-Keeping the model components together in one `model.py` makes it easy to step
-from patch extraction through attention and classification without jumping
-between many files. Data loading and training remain separate so the model has
-no import-time side effects.
-
-## Forward pass
+## Forward-pass shape trace
 
 ```text
 [B, 1, 28, 28] image batch
@@ -102,24 +70,110 @@ no import-time side effects.
 [B, 64] class-token representation
         |
         v
-[B, 10] digit logits
+[B, 10] raw digit logits
 ```
 
-The complete component contracts, equations, alternatives, tests, and delivery
-phases are in [IMPLEMENTATION_PLAN.md](IMPLEMENTATION_PLAN.md).
+See [ARCHITECTURE.md](ARCHITECTURE.md) for the component contracts, equations,
+design alternatives, test coverage, and detailed debugger guidance.
 
-## Environment
+## Project structure
 
-The repository currently uses a Python 3.12 virtual environment at `.venv`.
+```text
+vit-mnist-from-scratch/
+|-- ARCHITECTURE.md
+|-- README.md
+|-- requirements.txt
+|-- train.py
+|-- src/
+|   `-- vit_mnist/
+|       |-- model.py
+|       `-- data.py
+|-- scripts/
+|   `-- debug_single_image.py
+|-- tests/
+|   |-- test_model.py
+|   `-- test_training.py
+|-- data/                       # generated/downloaded; ignored by Git
+`-- checkpoints/                # generated; ignored by Git
+```
 
-PowerShell activation command:
+Keeping the model components together in `model.py` makes it possible to step
+from patch extraction through attention and classification without jumping
+between many files. Data loading and training remain separate, so importing the
+model does not download data, start training, or select a device.
+
+## Setup
+
+Python 3.12 is the environment used for the reported runs. From a fresh clone,
+create and activate a virtual environment and install the pinned dependencies.
+On Windows PowerShell, run:
 
 ```powershell
+python -m venv .venv
 .\.venv\Scripts\Activate.ps1
+python -m pip install -r requirements.txt
 ```
 
-The pinned CPU environment provides PyTorch and torchvision; torchvision is
-used only for MNIST loading and basic tensor normalization.
+On Linux or macOS, run:
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements.txt
+```
+
+## Train, then debug
+
+### 1. Train the model
+
+```powershell
+python train.py
+```
+
+Normal training runs on CPU for five epochs. It downloads MNIST into `data/` if
+necessary, prints training loss and accuracy plus test accuracy for each epoch,
+and writes the final state dictionary to `checkpoints/vit_mnist.pt`. Both the
+dataset and checkpoint are ignored by Git.
+
+Use `--no-download` to require an existing local MNIST dataset. Run
+`python train.py --help` for the small set of checkpoint, data-root, epoch,
+and tiny-subset options.
+
+### 2. Debug one trained prediction
+
+After the default checkpoint exists, run:
+
+```powershell
+python scripts/debug_single_image.py
+```
+
+The script loads `checkpoints/vit_mnist.pt` on CPU and passes MNIST test image
+index 0 through the model with batch shape `[1, 1, 28, 28]`. It prints the true
+label, raw logits, prediction, and correctness.
+
+Useful breakpoint locations in `src/vit_mnist/model.py` include patch
+extraction, patch projection, separate Q/K/V projection, head splitting,
+attention scores, attention probabilities, context aggregation, residual
+additions, and final logits. The precise breakpoint sequence and expected local
+tensor shapes are in [ARCHITECTURE.md](ARCHITECTURE.md#8-debugging-one-image).
+
+## Tests and synthetic smoke test
+
+Run the unit tests without downloading MNIST:
+
+```powershell
+python -m unittest discover -s tests
+```
+
+Run the model's additional synthetic component smoke test with:
+
+```powershell
+python src/vit_mnist/model.py
+```
+
+The unit tests cover patch order and shapes, model component contracts, finite
+forward and backward values, supported invalid configurations, one training
+update, evaluation behavior, and checkpoint round trips.
 
 ## Results
 
@@ -134,33 +188,13 @@ The normal five-epoch MNIST experiment produced:
 | 5 | 0.1501 | 95.41% | 95.23% |
 
 The tiny-subset validation used 128 fixed training examples and reached 100%
-training accuracy, with a final loss of 0.0632 after 100 epochs. Deliberately
-overfitting this small subset verifies that the model, loss, optimizer, and
-gradient-update pipeline can learn. The final 95.23% test accuracy from normal
-training demonstrates generalization to unseen MNIST test images.
-
-## Running the project
-
-Activate the virtual environment:
+training accuracy, with a final loss of 0.0632 after 100 epochs. That historical
+run used:
 
 ```powershell
-.\.venv\Scripts\Activate.ps1
+python train.py --tiny-subset --epochs 100 --checkpoint-path checkpoints/tiny-validation.pt
 ```
 
-Run the normal five-epoch MNIST training experiment with:
-
-```powershell
-python .\train.py
-```
-
-Step the fixed MNIST test image at dataset index 0 through the trained model on
-CPU with:
-
-```powershell
-python .\scripts\debug_single_image.py
-```
-
-The debugger loads `checkpoints/vit_mnist.pt`, keeps the model output as raw
-logits, and uses batch size one with gradient recording disabled. Checkpoint
-files ending in `.pt` are intentionally ignored by Git and must not be
-committed.
+Deliberately overfitting this subset checks that the model, loss, optimizer,
+and gradient-update pipeline can learn. The final 95.23% test accuracy from the
+normal run demonstrates generalization to unseen MNIST test images.
